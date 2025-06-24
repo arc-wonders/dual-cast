@@ -20,7 +20,7 @@ transform = transforms.Compose([
 ])
 
 # Load and preprocess the image
-image_path = "D:/dual cast/training/test.jpg"  # change to your test image path
+image_path = "D:/dual cast/random.jpeg"  # change to your test image path
 image = Image.open(image_path).convert("RGB")
 input_tensor = transform(image).unsqueeze(0)
 

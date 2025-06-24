@@ -20,7 +20,7 @@ transform = transforms.Compose([
 ])
 
 # Folder containing test images
-image_folder = "D:/dual cast/random"  # ✅ Change this folder path as needed
+image_folder = "D:/dual cast/test"  # ✅ Change this folder path as needed
 
 # Supported image extensions
 valid_exts = ['.jpg', '.jpeg', '.png']
