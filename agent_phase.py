@@ -1,438 +1,469 @@
 import cv2
-import numpy as np
 import json
-import argparse
-from typing import Dict, List, Tuple, Optional, Set
-from dataclasses import dataclass
-from enum import Enum
 import os
-import sys
+import argparse
+from pathlib import Path
+from datetime import datetime
+import torch
+from ultralytics import YOLO
+import numpy as np
 
-# Try to import YOLO - you can replace this with your preferred detection library
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    YOLO_AVAILABLE = False
-    print("Warning: ultralytics not installed. Using mock detection for demo.")
-
-class PlayerState(Enum):
-    NOT_SELECTED = "not_selected"
-    HOVERING = "hovering"
-    LOCKED = "locked"
-
-@dataclass
-class BoundingBox:
-    x1: float
-    y1: float
-    x2: float
-    y2: float
-    class_name: str
-    confidence: float
-    
-    def center(self) -> Tuple[float, float]:
-        return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-    
-    def area(self) -> float:
-        return (self.x2 - self.x1) * (self.y2 - self.y1)
-    
-    def iou(self, other: 'BoundingBox') -> float:
-        """Calculate Intersection over Union with another bounding box"""
-        x1 = max(self.x1, other.x1)
-        y1 = max(self.y1, other.y1)
-        x2 = min(self.x2, other.x2)
-        y2 = min(self.y2, other.y2)
-        
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
-        
-        intersection = (x2 - x1) * (y2 - y1)
-        union = self.area() + other.area() - intersection
-        return intersection / union if union > 0 else 0.0
-
-@dataclass
-class PlayerStatus:
-    state: PlayerState = PlayerState.NOT_SELECTED
-    agent: Optional[str] = None
-    last_hover_agent: Optional[str] = None
-    hover_frames: int = 0
-    lock_frames: int = 0
-    last_position: Optional[Tuple[float, float]] = None
-
-class ValorantImageAnalyzer:
-    def __init__(self, model_path: str = None, confidence_threshold: float = 0.5):
+class YOLOv8Detector:
+    def __init__(self, model_path="D:/dual cast/models/agent_phase.pt"):
         """
-        Initialize Valorant Image Analyzer
+        Initialize YOLOv8 detector with custom trained model
         
         Args:
-            model_path: Path to YOLO model file (.pt), if None uses mock detection
-            confidence_threshold: Minimum confidence for detections
+            model_path (str): Path to the trained YOLOv8 model
         """
-        self.confidence_threshold = confidence_threshold
+        self.model_path = model_path
         self.model = None
+        self.load_model()
         
-        if model_path and YOLO_AVAILABLE:
-            if os.path.exists(model_path):
-                self.model = YOLO(model_path)
-                print(f"Loaded YOLO model from {model_path}")
-            else:
-                print(f"Model file {model_path} not found. Using mock detection.")
-        else:
-            print("Using mock detection mode (no YOLO model provided)")
-        
-        # Valorant agent names
-        self.agent_names = {
-            "jett", "reyna", "phoenix", "raze", "yoru", "neon",  # Duelists
-            "sova", "breach", "skye", "kayo", "fade", "gekko",   # Initiators
-            "omen", "brimstone", "astra", "viper", "harbor",    # Controllers
-            "sage", "cypher", "killjoy", "chamber", "deadlock"  # Sentinels
-        }
-        
-        # Detection class names your YOLO model should recognize
-        self.detection_classes = [
-            "agent_card", "highlighted_agent", "lock_in_button", 
-            "locked_icon", "timer_bar", "player_name"
-        ] + [f"agent_{agent}" for agent in self.agent_names]
+    def load_model(self):
+        """Load the YOLOv8 model"""
+        try:
+            self.model = YOLO(self.model_path)
+            print(f"Model loaded successfully from {self.model_path}")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
     
-    def mock_detect_objects(self, image: np.ndarray) -> List[Dict]:
+    def detect_image(self, image_path, output_dir="results", conf_threshold=0.85):
         """
-        Mock detection function for demo purposes
-        Replace this with your actual YOLO model inference
-        """
-        height, width = image.shape[:2]
+        Detect objects in a single image
         
-        # Simulate some detections based on image analysis
+        Args:
+            image_path (str): Path to input image
+            output_dir (str): Directory to save results
+            conf_threshold (float): Confidence threshold for detections
+            
+        Returns:
+            dict: Detection results
+        """
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Run inference
+        results = self.model(image_path, conf=conf_threshold)
+        
+        # Process results
+        image_name = Path(image_path).stem
         detections = []
         
-        # Simple color-based detection for demo
-        # In reality, your YOLO model would do this detection
-        
-        # Convert to HSV for better color detection
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        
-        # Mock detection: Look for bright regions (could be highlighted agents)
-        bright_mask = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 50, 255]))
-        contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for i, contour in enumerate(contours[:3]):  # Limit to 3 detections
-            if cv2.contourArea(contour) > 1000:  # Filter small areas
-                x, y, w, h = cv2.boundingRect(contour)
-                
-                # Mock different types of detections
-                if i == 0:
-                    class_name = "highlighted_agent_jett"
-                elif i == 1:
-                    class_name = "highlighted_agent_sova"
-                else:
-                    class_name = "agent_card"
-                
-                detection = {
-                    "x1": float(x),
-                    "y1": float(y),
-                    "x2": float(x + w),
-                    "y2": float(y + h),
-                    "class": class_name,
-                    "confidence": 0.85 + i * 0.05
-                }
-                detections.append(detection)
-        
-        # Add mock locked icon if bright regions found
-        if len(detections) > 0:
-            first_det = detections[0]
-            lock_detection = {
-                "x1": first_det["x1"] + 50,
-                "y1": first_det["y1"] + 10,
-                "x2": first_det["x1"] + 80,
-                "y2": first_det["y1"] + 40,
-                "class": "locked_icon",
-                "confidence": 0.90
-            }
-            detections.append(lock_detection)
-        
-        return detections
-    
-    def detect_objects(self, image: np.ndarray) -> List[Dict]:
-        """
-        Detect objects in image using YOLO model or mock detection
-        
-        Args:
-            image: Input image as numpy array
-            
-        Returns:
-            List of detection dictionaries
-        """
-        if self.model is not None:
-            # Real YOLO detection
-            results = self.model(image, conf=self.confidence_threshold)
-            detections = []
-            
-            if results[0].boxes is not None:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                confidences = results[0].boxes.conf.cpu().numpy()
-                classes = results[0].boxes.cls.cpu().numpy()
-                
-                for box, conf, cls_id in zip(boxes, confidences, classes):
-                    class_name = results[0].names[int(cls_id)]
+        for r in results:
+            boxes = r.boxes
+            if boxes is not None:
+                for i, box in enumerate(boxes):
+                    # Extract box coordinates
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = box.conf[0].cpu().numpy()
+                    class_id = int(box.cls[0].cpu().numpy())
+                    class_name = self.model.names[class_id]
                     
                     detection = {
-                        "x1": float(box[0]),
-                        "y1": float(box[1]),
-                        "x2": float(box[2]),
-                        "y2": float(box[3]),
-                        "class": class_name,
-                        "confidence": float(conf)
+                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                        "confidence": float(confidence),
+                        "class_id": class_id,
+                        "class_name": class_name
                     }
                     detections.append(detection)
-            
-            return detections
-        else:
-            # Use mock detection
-            return self.mock_detect_objects(image)
-    
-    def extract_agent_name(self, detection_class: str) -> Optional[str]:
-        """Extract agent name from detection class"""
-        detection_lower = detection_class.lower()
         
-        for agent in self.agent_names:
-            if agent in detection_lower:
-                return agent.capitalize()
-        
-        return None
-    
-    def find_associated_lock_icon(self, highlighted_box: BoundingBox, lock_icons: List[BoundingBox], 
-                                 proximity_threshold: float = 0.1) -> Optional[BoundingBox]:
-        """Find lock icon associated with highlighted agent"""
-        best_match = None
-        best_distance = float('inf')
-        
-        highlight_center = highlighted_box.center()
-        
-        for lock_icon in lock_icons:
-            lock_center = lock_icon.center()
-            distance = ((highlight_center[0] - lock_center[0]) ** 2 + 
-                       (highlight_center[1] - lock_center[1]) ** 2) ** 0.5
-            
-            # Check if lock icon is within reasonable distance
-            max_distance = min(highlighted_box.area() ** 0.5 * 0.5, 100)
-            
-            if distance < max_distance and distance < best_distance:
-                best_match = lock_icon
-                best_distance = distance
-        
-        return best_match
-    
-    def assign_detection_to_player(self, box: BoundingBox, existing_assignments: Dict) -> str:
-        """Assign detection to player based on position"""
-        box_center = box.center()
-        
-        # Simple assignment based on vertical position
-        # Assuming players are arranged vertically in selection screen
-        player_index = min(max(1, int(box_center[1] // 120) + 1), 5)
-        return f"player{player_index}"
-    
-    def analyze_image(self, image_path: str) -> Dict:
-        """
-        Analyze a single image for Valorant agent selection events
-        
-        Args:
-            image_path: Path to input image
-            
-        Returns:
-            Dictionary containing analysis results
-        """
-        # Load image
-        if not os.path.exists(image_path):
-            return {"error": f"Image file {image_path} not found"}
-        
-        image = cv2.imread(image_path)
-        if image is None:
-            return {"error": f"Could not load image {image_path}"}
-        
-        # Detect objects
-        detections = self.detect_objects(image)
-        
-        # Parse detections into BoundingBox objects
-        boxes = []
-        for detection in detections:
-            box = BoundingBox(
-                x1=detection['x1'],
-                y1=detection['y1'],
-                x2=detection['x2'],
-                y2=detection['y2'],
-                class_name=detection['class'],
-                confidence=detection['confidence']
-            )
-            boxes.append(box)
-        
-        # Separate detection types
-        highlighted_agents = [box for box in boxes if "highlighted_agent" in box.class_name or "agent_" in box.class_name]
-        lock_icons = [box for box in boxes if "locked_icon" in box.class_name]
-        agent_cards = [box for box in boxes if "agent_card" in box.class_name]
-        
-        # Initialize player statuses
-        player_statuses = {}
-        team_composition = []
-        events = []
-        
-        # Process highlighted agents
-        for highlighted_box in highlighted_agents:
-            agent_name = self.extract_agent_name(highlighted_box.class_name)
-            if not agent_name:
-                continue
-            
-            player_id = self.assign_detection_to_player(highlighted_box, player_statuses)
-            
-            # Check for associated lock icon
-            associated_lock = self.find_associated_lock_icon(highlighted_box, lock_icons)
-            
-            if associated_lock:
-                # Player has locked in
-                player_statuses[player_id] = {
-                    "state": "locked",
-                    "agent": agent_name
-                }
-                team_composition.append(agent_name)
-                events.append(f"{player_id}_locked_{agent_name}")
-            else:
-                # Player is hovering
-                player_statuses[player_id] = {
-                    "state": "hovering", 
-                    "agent": agent_name
-                }
-                events.append(f"{player_id}_hovering_{agent_name}")
-        
-        # Fill in remaining players
-        for i in range(1, 6):
-            player_id = f"player{i}"
-            if player_id not in player_statuses:
-                player_statuses[player_id] = {
-                    "state": "not_selected",
-                    "agent": None
-                }
-        
-        # Build result
-        result = {
+        # Prepare result data
+        result_data = {
             "image_path": image_path,
-            "phase": "agent_selection",
-            "player_status": player_statuses,
-            "team_composition": team_composition,
-            "events": events,
-            "detection_summary": {
-                "total_detections": len(detections),
-                "highlighted_agents": len(highlighted_agents),
-                "lock_icons": len(lock_icons),
-                "agent_cards": len(agent_cards)
-            },
-            "raw_detections": detections
+            "image_name": image_name,
+            "timestamp": datetime.now().isoformat(),
+            "total_detections": len(detections),
+            "detections": detections
         }
         
-        return result
+        # Save annotated image
+        annotated_img = results[0].plot()
+        annotated_path = os.path.join(output_dir, f"{image_name}_annotated.jpg")
+        cv2.imwrite(annotated_path, annotated_img)
+        
+        # Save JSON results
+        json_path = os.path.join(output_dir, f"{image_name}_results.json")
+        with open(json_path, 'w') as f:
+            json.dump(result_data, f, indent=2)
+        
+        print(f"Results saved: {json_path}")
+        print(f"Annotated image saved: {annotated_path}")
+        
+        return result_data
     
-    def visualize_detections(self, image_path: str, output_path: str = None) -> np.ndarray:
+    def detect_video(self, video_path, output_dir="results", conf_threshold=0.85, frame_interval=30):
         """
-        Visualize detections on the image
+        Detect objects in a video
         
         Args:
-            image_path: Path to input image
-            output_path: Path to save annotated image (optional)
+            video_path (str): Path to input video
+            output_dir (str): Directory to save results
+            conf_threshold (float): Confidence threshold for detections
+            frame_interval (int): Process every Nth frame (e.g., 30 means process 1 frame out of every 30)
             
         Returns:
-            Annotated image as numpy array
+            dict: Detection results for all frames
         """
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"Could not load image {image_path}")
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Open video
+        cap = cv2.VideoCapture(video_path)
+        video_name = Path(video_path).stem
+        
+        # Get video properties
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Calculate actual output FPS based on frame interval
+        actual_output_fps = original_fps / frame_interval
+        
+        print(f"Video processing settings:")
+        print(f"  Original FPS: {original_fps:.2f}")
+        print(f"  Frame interval: {frame_interval} (processing every {frame_interval} frames)")
+        print(f"  Output video FPS: {actual_output_fps:.2f}")
+        print(f"  Estimated processed frames: {total_frames // frame_interval}")
+        
+        # Setup video writer for annotated output
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        annotated_video_path = os.path.join(output_dir, f"{video_name}_annotated.mp4")
+        out = cv2.VideoWriter(annotated_video_path, fourcc, actual_output_fps, (width, height))
+        
+        # Process video frames
+        all_detections = []
+        frame_count = 0
+        processed_frame_count = 0
+        
+        print(f"Processing video: {video_path}")
+        print(f"Total frames: {total_frames}")
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # Skip frames based on FPS setting
+            if frame_count % frame_skip == 0:
+                # Run inference on frame
+                results = self.model(frame, conf=conf_threshold)
+                
+                # Process detections for current frame
+                frame_detections = []
+                for r in results:
+                    boxes = r.boxes
+                    if boxes is not None:
+                        for box in boxes:
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            confidence = box.conf[0].cpu().numpy()
+                            class_id = int(box.cls[0].cpu().numpy())
+                            class_name = self.model.names[class_id]
+                            
+                            detection = {
+                                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                                "confidence": float(confidence),
+                                "class_id": class_id,
+                                "class_name": class_name
+                            }
+                            frame_detections.append(detection)
+                
+                # Store frame results
+                frame_data = {
+                    "original_frame_number": frame_count,
+                    "processed_frame_number": processed_frame_count,
+                    "timestamp": frame_count / original_fps,
+                    "detections": frame_detections
+                }
+                all_detections.append(frame_data)
+                
+                # Write annotated frame
+                annotated_frame = results[0].plot()
+                out.write(annotated_frame)
+                
+                processed_frame_count += 1
+                
+                if processed_frame_count % 30 == 0:  # Progress update every 30 processed frames
+                    print(f"Processed {processed_frame_count} frames ({frame_count}/{total_frames} original frames)")
+            
+            frame_count += 1
+        
+        # Release resources
+        cap.release()
+        out.release()
+        
+        # Prepare final results
+        video_results = {
+            "video_path": video_path,
+            "video_name": video_name,
+            "timestamp": datetime.now().isoformat(),
+            "video_info": {
+                "original_fps": original_fps,
+                "output_fps": actual_output_fps,
+                "frame_skip": frame_skip,
+                "width": width,
+                "height": height,
+                "total_original_frames": total_frames,
+                "total_processed_frames": processed_frame_count,
+                "duration_seconds": total_frames / original_fps
+            },
+            "processing_settings": {
+                "confidence_threshold": conf_threshold,
+                "requested_output_fps": output_fps
+            },
+            "frames": all_detections
+        }
+        
+        # Save JSON results
+        json_path = os.path.join(output_dir, f"{video_name}_results.json")
+        with open(json_path, 'w') as f:
+            json.dump(video_results, f, indent=2)
+        
+        print(f"Video processing complete!")
+        print(f"Results saved: {json_path}")
+        print(f"Annotated video saved: {annotated_video_path}")
+        print(f"Processed {processed_frame_count} out of {total_frames} frames")
+        
+        return video_results
+    
+    def detect_folder(self, folder_path, output_dir="results", conf_threshold=0.85):
+        """
+        Detect objects in all images in a folder
+        
+        Args:
+            folder_path (str): Path to folder containing images
+            output_dir (str): Directory to save results
+            conf_threshold (float): Confidence threshold for detections
+            
+        Returns:
+            dict: Detection results for all images
+        """
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Supported image extensions
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tga'}
+        
+        # Find all images in folder
+        folder_path = Path(folder_path)
+        image_files = [f for f in folder_path.iterdir() 
+                      if f.suffix.lower() in image_extensions]
+        
+        if not image_files:
+            print(f"No images found in {folder_path}")
             return None
         
-        detections = self.detect_objects(image)
+        print(f"Found {len(image_files)} images in {folder_path}")
         
-        # Draw bounding boxes
-        for detection in detections:
-            x1, y1, x2, y2 = int(detection['x1']), int(detection['y1']), int(detection['x2']), int(detection['y2'])
-            conf = detection['confidence']
-            class_name = detection['class']
+        # Process each image
+        all_results = []
+        for i, image_file in enumerate(image_files):
+            print(f"Processing {i+1}/{len(image_files)}: {image_file.name}")
             
-            # Color based on detection type
-            if "highlighted_agent" in class_name:
-                color = (0, 255, 0)  # Green
-            elif "locked_icon" in class_name:
-                color = (0, 0, 255)  # Red
-            elif "agent_card" in class_name:
-                color = (255, 0, 0)  # Blue
-            else:
-                color = (128, 128, 128)  # Gray
+            # Create subdirectory for this image
+            image_output_dir = os.path.join(output_dir, "individual_images")
             
-            # Draw bounding box
-            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
-            
-            # Draw label
-            label = f"{class_name}: {conf:.2f}"
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-            cv2.rectangle(image, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), color, -1)
-            cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            # Process image
+            result = self.detect_image(str(image_file), image_output_dir, conf_threshold)
+            all_results.append(result)
         
-        if output_path:
-            cv2.imwrite(output_path, image)
-            print(f"Annotated image saved to {output_path}")
+        # Compile folder results
+        folder_results = {
+            "folder_path": str(folder_path),
+            "timestamp": datetime.now().isoformat(),
+            "total_images": len(image_files),
+            "images_processed": len(all_results),
+            "results": all_results
+        }
         
-        return image
+        # Save combined JSON results
+        json_path = os.path.join(output_dir, f"folder_results.json")
+        with open(json_path, 'w') as f:
+            json.dump(folder_results, f, indent=2)
+        
+        print(f"Folder processing complete!")
+        print(f"Combined results saved: {json_path}")
+        
+        return folder_results
+
+def get_user_input():
+    """Get user input interactively"""
+    print("\n" + "="*60)
+    print("           YOLOv8 Object Detection System")
+    print("="*60)
+    
+    # Get input type
+    print("\nSelect input type:")
+    print("1. Single Image")
+    print("2. Video File")
+    print("3. Image Folder")
+    
+    while True:
+        choice = input("\nEnter your choice (1-3): ").strip()
+        if choice in ['1', '2', '3']:
+            break
+        print("Invalid choice. Please enter 1, 2, or 3.")
+    
+    input_type_map = {'1': 'image', '2': 'video', '3': 'folder'}
+    input_type = input_type_map[choice]
+    
+    # Get input path
+    if input_type == 'image':
+        input_path = input("\nEnter path to image file: ").strip().strip('"')
+    elif input_type == 'video':
+        input_path = input("\nEnter path to video file: ").strip().strip('"')
+    else:  # folder
+        input_path = input("\nEnter path to image folder: ").strip().strip('"')
+    
+    # Validate input path
+    if not os.path.exists(input_path):
+        print(f"Error: Path '{input_path}' does not exist!")
+        return None
+    
+    # Get model path
+    default_model = "D:/dual cast/models/agent_phase.pt"
+    print(f"\nModel path (default: {default_model})")
+    model_path = input("Enter custom model path or press Enter for default: ").strip().strip('"')
+    if not model_path:
+        model_path = default_model
+    
+    # Validate model path
+    if not os.path.exists(model_path):
+        print(f"Error: Model path '{model_path}' does not exist!")
+        return None
+    
+    # Get output directory
+    default_output = "results"
+    print(f"\nOutput directory (default: {default_output})")
+    output_dir = input("Enter output directory or press Enter for default: ").strip().strip('"')
+    if not output_dir:
+        output_dir = default_output
+    
+    # Get confidence threshold
+    print(f"\nConfidence threshold (default: 0.85)")
+    conf_input = input("Enter confidence threshold (0.0-1.0) or press Enter for default: ").strip()
+    try:
+        conf_threshold = float(conf_input) if conf_input else 0.85
+        if not (0 <= conf_threshold <= 1):
+            print("Warning: Confidence threshold should be between 0 and 1. Using default 0.85")
+            conf_threshold = 0.85
+    except ValueError:
+        print("Invalid confidence threshold. Using default 0.85")
+        conf_threshold = 0.85
+    
+    # Get FPS for video processing (only if video is selected)
+    output_fps = None
+    if input_type == 'video':
+        print(f"\nOutput video FPS (default: 30)")
+        fps_input = input("Enter desired FPS for output video or press Enter for default: ").strip()
+        try:
+            output_fps = int(fps_input) if fps_input else 30
+            if output_fps <= 0:
+                print("Warning: FPS should be greater than 0. Using default 30")
+                output_fps = 30
+        except ValueError:
+            print("Invalid FPS value. Using default 30")
+            output_fps = 30
+    
+    return {
+        'input_type': input_type,
+        'input_path': input_path,
+        'model_path': model_path,
+        'output_dir': output_dir,
+        'conf_threshold': conf_threshold,
+        'output_fps': output_fps
+    }
+
+def interactive_mode():
+    """Run in interactive mode"""
+    print("Starting YOLOv8 Detection System...")
+    
+    while True:
+        # Get user input
+        config = get_user_input()
+        if config is None:
+            continue
+        
+        try:
+            # Initialize detector
+            print(f"\nLoading model: {config['model_path']}")
+            detector = YOLOv8Detector(config['model_path'])
+            
+            # Show processing info
+            print(f"\nProcessing Configuration:")
+            print(f"  Input Type: {config['input_type'].upper()}")
+            print(f"  Input Path: {config['input_path']}")
+            print(f"  Output Directory: {config['output_dir']}")
+            print(f"  Confidence Threshold: {config['conf_threshold']}")
+            if config['output_fps'] is not None:
+                print(f"  Output Video FPS: {config['output_fps']}")
+            
+            # Process based on input type
+            print(f"\nStarting detection...")
+            if config['input_type'] == 'video':
+                detector.detect_video(config['input_path'], config['output_dir'], 
+                                    config['conf_threshold'], config['output_fps'])
+            elif config['input_type'] == 'image':
+                detector.detect_image(config['input_path'], config['output_dir'], config['conf_threshold'])
+            elif config['input_type'] == 'folder':
+                detector.detect_folder(config['input_path'], config['output_dir'], config['conf_threshold'])
+            
+            print("\n" + "="*60)
+            print("           DETECTION COMPLETED SUCCESSFULLY!")
+            print("="*60)
+            
+        except Exception as e:
+            print(f"\nError during processing: {e}")
+            
+        # Ask if user wants to continue
+        print("\n" + "-"*60)
+        while True:
+            continue_choice = input("Do you want to process another file? (y/n): ").strip().lower()
+            if continue_choice in ['y', 'yes', 'n', 'no']:
+                break
+            print("Please enter 'y' for yes or 'n' for no.")
+        
+        if continue_choice in ['n', 'no']:
+            print("\nThank you for using YOLOv8 Detection System!")
+            break
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze Valorant agent selection from image")
-    parser.add_argument("image_path", help="Path to input image")
-    parser.add_argument("--model", help="Path to YOLO model file (.pt)")
-    parser.add_argument("--output", help="Path to save JSON results")
-    parser.add_argument("--visualize", help="Path to save annotated image")
-    parser.add_argument("--confidence", type=float, default=0.5, help="Detection confidence threshold")
+    """Main function with both interactive and command line modes"""
+    import sys
     
-    args = parser.parse_args()
-    
-    # Initialize analyzer
-    analyzer = ValorantImageAnalyzer(
-        model_path=args.model,
-        confidence_threshold=args.confidence
-    )
-    
-    # Analyze image
-    print(f"Analyzing image: {args.image_path}")
-    result = analyzer.analyze_image(args.image_path)
-    
-    # Print results
-    print("\n" + "="*50)
-    print("VALORANT AGENT SELECTION ANALYSIS")
-    print("="*50)
-    
-    if "error" in result:
-        print(f"Error: {result['error']}")
-        return
-    
-    print(f"Phase: {result['phase']}")
-    print(f"Events detected: {result['events']}")
-    print(f"Team composition: {result['team_composition']}")
-    
-    print("\nPlayer Status:")
-    for player_id, status in result['player_status'].items():
-        agent = status['agent'] or 'None'
-        print(f"  {player_id}: {status['state']} - {agent}")
-    
-    print(f"\nDetection Summary:")
-    summary = result['detection_summary']
-    print(f"  Total detections: {summary['total_detections']}")
-    print(f"  Highlighted agents: {summary['highlighted_agents']}")
-    print(f"  Lock icons: {summary['lock_icons']}")
-    print(f"  Agent cards: {summary['agent_cards']}")
-    
-    # Save JSON output
-    if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(result, f, indent=2)
-        print(f"\nResults saved to: {args.output}")
-    
-    # Create visualization
-    if args.visualize:
-        analyzer.visualize_detections(args.image_path, args.visualize)
-    
-    print("\nAnalysis complete!")
+    # Check if command line arguments are provided
+    if len(sys.argv) > 1:
+        # Command line mode
+        parser = argparse.ArgumentParser(description="YOLOv8 Object Detection")
+        parser.add_argument("--input", "-i", required=True, help="Input path (video, image, or folder)")
+        parser.add_argument("--type", "-t", choices=["video", "image", "folder"], 
+                           required=True, help="Input type")
+        parser.add_argument("--model", "-m", default="D:/dual cast/models/agent_phase.pt", 
+                           help="Path to YOLOv8 model")
+        parser.add_argument("--output", "-o", default="results", 
+                           help="Output directory")
+        parser.add_argument("--conf", "-c", type=float, default=0.85, 
+                           help="Confidence threshold (default: 0.85)")
+        parser.add_argument("--fps", "-f", type=int, default=30,
+                           help="Output video FPS (default: 30, only applies to video processing)")
+        
+        args = parser.parse_args()
+        
+        # Initialize detector
+        detector = YOLOv8Detector(args.model)
+        
+        # Process based on input type
+        if args.type == "video":
+            detector.detect_video(args.input, args.output, args.conf, args.fps)
+        elif args.type == "image":
+            detector.detect_image(args.input, args.output, args.conf)
+        elif args.type == "folder":
+            detector.detect_folder(args.input, args.output, args.conf)
+    else:
+        # Interactive mode
+        interactive_mode()
 
 if __name__ == "__main__":
     main()
